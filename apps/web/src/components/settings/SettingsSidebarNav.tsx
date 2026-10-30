@@ -34,9 +34,17 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
+import * as Schema from "effect/Schema";
+
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { cn } from "../../lib/utils";
+import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
+import { useLocalStorage } from "../../hooks/useLocalStorage";
+import { useMergedSettings } from "../../hooks/useSettings";
+import { useTheme } from "../../hooks/useTheme";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
+import { Switch } from "../ui/switch";
 import {
   SidebarContent,
   SidebarFooter,
@@ -48,6 +56,11 @@ import {
 } from "../ui/sidebar";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
+  getModifiedSearchItemIds,
+  isModifiedSearchItem,
+  MODIFIED_ONLY_STORAGE_KEY,
+} from "./modifiedSettings";
+import {
   searchSettings,
   revealSettingsSearchTarget,
   SETTINGS_NAV_GROUPS,
@@ -56,6 +69,7 @@ import {
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
+import { useOptionalSettingsScope } from "./SettingsScopeContext";
 import { validateSettingsScopeSearch } from "./settingsScope";
 import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
@@ -144,11 +158,38 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   // Below md the nav is an icon rail; searching expands it over the page.
   const [compactSearchOpen, setCompactSearchOpen] = useState(false);
   const [activeResultIndex, setActiveResultIndex] = useState(0);
+  const [modifiedOnly, setModifiedOnly] = useLocalStorage(
+    MODIFIED_ONLY_STORAGE_KEY,
+    false,
+    Schema.Boolean,
+  );
+  const scopeContext = useOptionalSettingsScope();
+  const scopedSettings = useMergedSettings(
+    scopeContext?.target?.settings ?? DEFAULT_SERVER_SETTINGS,
+  );
+  const { theme, followSystem, themeHalves } = useTheme();
+  const [separateFonts] = useLocalStorage(TYPOGRAPHY_ADVANCED_STORAGE_KEY, false, Schema.Boolean);
+  const modifiedIds = new Set(
+    getModifiedSearchItemIds(scopedSettings, {
+      theme,
+      followSystem,
+      hasThemeMix: themeHalves !== null,
+      separateFonts,
+    }),
+  );
   const searchableItems = useAvailableSettingsSearchItems(scopeSearch);
-  const results = searchSettings(query, searchableItems);
+  const modifiedCount = searchableItems.filter((item) =>
+    isModifiedSearchItem(item, modifiedIds),
+  ).length;
+  const visibleItems = modifiedOnly
+    ? searchableItems.filter((item) => isModifiedSearchItem(item, modifiedIds))
+    : searchableItems;
+  const results = searchSettings(query, visibleItems);
   const isSearching = query.trim().length > 0;
+  const showModifiedList = modifiedOnly && !isSearching;
   const hasResults = results.length > 0;
-  const maxResultIndex = Math.max(results.length - 1, 0);
+  const activeList = isSearching ? results : showModifiedList ? visibleItems : [];
+  const maxResultIndex = Math.max(activeList.length - 1, 0);
   // Persist the clamp so a shrink-then-recover of results keeps the clamped highlight.
   if (activeResultIndex > maxResultIndex) {
     setActiveResultIndex(maxResultIndex);
@@ -209,7 +250,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
     setActiveResultIndex(0);
   };
   const handleSearchResultClick = (item: SettingsSearchItem) => {
-    clearSearch();
+    if (isSearching) clearSearch();
+    setActiveResultIndex(0);
     setCompactSearchOpen(false);
     const targetId = item.targetId ?? item.id;
     revealSettingsSearchTarget(targetId);
@@ -233,20 +275,20 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       clearSearch();
       return;
     }
-    if (results.length === 0) return;
+    if (activeList.length === 0) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActiveResultIndex((activeResultIndex + 1) % results.length);
+      setActiveResultIndex((activeResultIndex + 1) % activeList.length);
       return;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      setActiveResultIndex((activeResultIndex - 1 + results.length) % results.length);
+      setActiveResultIndex((activeResultIndex - 1 + activeList.length) % activeList.length);
       return;
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      const result = results[activeResultIndex];
+      const result = activeList[activeResultIndex];
       if (result) handleSearchResultClick(result);
     }
   };
@@ -289,11 +331,11 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 aria-label="Search settings"
                 role="combobox"
                 aria-autocomplete="list"
-                aria-expanded={isSearching && hasResults}
-                aria-controls={isSearching && hasResults ? "settings-search-results" : undefined}
+                aria-expanded={activeList.length > 0}
+                aria-controls={activeList.length > 0 ? "settings-search-results" : undefined}
                 aria-activedescendant={
-                  isSearching && results[activeResultIndex]
-                    ? `settings-search-result-${results[activeResultIndex].id}`
+                  activeList[activeResultIndex]
+                    ? `settings-search-result-${activeList[activeResultIndex].id}`
                     : undefined
                 }
                 className="min-w-0 flex-1"
@@ -316,21 +358,96 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 <Kbd>/</Kbd>
               )}
             </div>
+            <div
+              className={cn(
+                "flex h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground",
+                !compactSearchOpen && "max-md:hidden",
+              )}
+            >
+              <Switch
+                size="sm"
+                checked={modifiedOnly}
+                onCheckedChange={(checked) => {
+                  setModifiedOnly(Boolean(checked));
+                  setActiveResultIndex(0);
+                }}
+                aria-label="Show modified settings only"
+              />
+              <span className="min-w-0 flex-1 truncate">Modified only</span>
+              {modifiedCount > 0 ? (
+                <span
+                  aria-label={`${modifiedCount} modified ${modifiedCount === 1 ? "setting" : "settings"}`}
+                  className="shrink-0 rounded-full bg-sidebar-row-hover px-1.5 py-0.5 text-2xs font-medium text-sidebar-foreground tabular-nums"
+                >
+                  {modifiedCount}
+                </span>
+              ) : null}
+            </div>
             {isSearching && results.length === 0 ? (
               <p
                 role="status"
                 className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
               >
-                No settings found
+                {modifiedOnly ? "No modified settings match" : "No settings found"}
+              </p>
+            ) : null}
+            {!isSearching && showModifiedList && visibleItems.length === 0 ? (
+              <p
+                role="status"
+                className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
+              >
+                No modified settings
               </p>
             ) : null}
             {isSearching ? (
               <SidebarMenu
                 id={hasResults ? "settings-search-results" : undefined}
                 role={hasResults ? "listbox" : undefined}
-                aria-label={hasResults ? "Settings search results" : undefined}
+                aria-label={
+                  hasResults
+                    ? modifiedOnly
+                      ? "Modified settings search results"
+                      : "Settings search results"
+                    : undefined
+                }
               >
                 {results.map((item, index) => (
+                  <SidebarMenuItem
+                    key={item.id}
+                    role="presentation"
+                    ref={index === activeResultIndex ? scrollResultIntoView : undefined}
+                  >
+                    <SidebarMenuButton
+                      id={`settings-search-result-${item.id}`}
+                      role="option"
+                      aria-selected={index === activeResultIndex}
+                      tabIndex={-1}
+                      size="sm"
+                      isActive={index === activeResultIndex}
+                      className="h-auto min-h-10 items-start"
+                      onMouseMove={() => setActiveResultIndex(index)}
+                      onClick={() => handleSearchResultClick(item)}
+                    >
+                      <SettingsSectionIcon to={item.to} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-sidebar-foreground">
+                          {item.title}
+                        </span>
+                        <span className="block truncate text-2xs text-sidebar-muted-foreground/75">
+                          {SETTINGS_SECTION_LABELS[item.to]}
+                        </span>
+                      </span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            ) : showModifiedList ? (
+              <SidebarMenu
+                id={visibleItems.length > 0 ? "settings-search-results" : undefined}
+                role={visibleItems.length > 0 ? "listbox" : undefined}
+                aria-label={visibleItems.length > 0 ? "Modified settings" : undefined}
+              >
+                {visibleItems.map((item, index) => (
                   <SidebarMenuItem
                     key={item.id}
                     role="presentation"
